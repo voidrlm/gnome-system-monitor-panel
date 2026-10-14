@@ -1,0 +1,30 @@
+.sysmon-label { font-size: 0.9em; font-feature-settings: "tnum"; }
+.sysmon-menu { min-width: 360px; }
+
+.sysmon-stat-row { spacing: 10px; padding: 4px 0; }
+.sysmon-stat-icon { icon-size: 16px; color: rgba(255,255,255,0.7); }
+.sysmon-stat-name { min-width: 36px; font-weight: bold; }
+.sysmon-stat-val { min-width: 110px; text-align: right; font-feature-settings: "tnum"; color: rgba(255,255,255,0.8); }
+.sysmon-bar-bg { background-color: rgba(255,255,255,0.12); border-radius: 99px; height: 6px; min-width: 120px; }
+.sysmon-bar-fg { background-color: #3584e4; border-radius: 99px; height: 6px; }
+.sysmon-bar-fg.warn { background-color: #e5a50a; }
+.sysmon-bar-fg.crit { background-color: #e01b24; }
+.sysmon-net-down { background-color: #62a0ea; }
+.sysmon-net-up { background-color: #57e389; }
+
+.sysmon-proc-header { spacing: 8px; padding: 2px 6px 6px 6px; }
+.sysmon-section { font-weight: bold; }
+.sysmon-col { font-size: 0.85em; color: rgba(255,255,255,0.55); }
+.sysmon-empty { padding: 6px; color: rgba(255,255,255,0.55); font-style: italic; }
+
+.sysmon-proc-row { spacing: 10px; padding: 4px 6px; border-radius: 8px; }
+.sysmon-proc-row:hover { background-color: rgba(255,255,255,0.07); }
+.sysmon-proc-name { min-width: 140px; }
+.sysmon-proc-val { min-width: 60px; text-align: right; font-feature-settings: "tnum"; color: rgba(255,255,255,0.8); }
+.sysmon-proc-val.hot { color: #ffa348; font-weight: bold; }
+
+.sysmon-kill-spacer { width: 26px; }
+.sysmon-kill { width: 26px; height: 26px; border-radius: 99px; color: rgba(255,255,255,0.4); }
+.sysmon-proc-row:hover .sysmon-kill { color: rgba(255,255,255,0.8); }
+.sysmon-kill:hover, .sysmon-proc-row:hover .sysmon-kill:hover { background-color: #c01c28; color: #ffffff; }
+.sysmon-kill:focus { box-shadow: inset 0 0 0 2px rgba(53,132,228,0.8); }
