@@ -2,11 +2,17 @@
 
 A GNOME Shell extension that shows CPU, temperature, GPU and RAM usage in the top bar, with a list of the heaviest apps and a button to close them.
 
-![Performance gauge in the top bar](screenshots/icon.png)
+![Performance gauge in the top bar](screenshots/panel.png)
 
 ![CPU, temperature, GPU and RAM in the menu](screenshots/menu.png)
 
 Requires GNOME Shell 50.
+
+<details><summary>Where it sits in the top bar</summary>
+
+![The whole top bar](screenshots/top-bar.png)
+
+</details>
 
 ## Install
 
