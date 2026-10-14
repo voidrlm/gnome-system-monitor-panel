@@ -4,7 +4,7 @@ A GNOME Shell extension that shows CPU, temperature, GPU and RAM usage in the to
 
 ![Performance gauge in the top bar](screenshots/panel.png)
 
-![CPU, temperature, GPU and RAM in the menu](screenshots/menu.png)
+![CPU, temperature, GPU, RAM, network and the heaviest apps in the menu](screenshots/menu.png)
 
 Requires GNOME Shell 50.
 
