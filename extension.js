@@ -13,14 +13,11 @@ import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 // numbers aren't stale, then every REFRESH_MS.
 const REFRESH_MS = 1000;
 const FIRST_SAMPLE_MS = 300;
-// Re-list each process's open files (to find GPU handles) every N ticks;
-// in between, only the known GPU handles are read.
-const DRM_RESCAN_TICKS = 5;
 const PAGE_KB = 4;
 // Loopback, VPN tunnels and virtual bridges: traffic over a VPN also crosses
 // the physical interface, so counting tunnels too would double it.
 const NET_IGNORED = /^(lo|tun|tap|wg|virbr|docker|br-|veth|vnet)/;
-const TOP_N = 8;
+const TOP_N = 10;
 const PROTECTED = new Set(['gnome-shell', 'systemd', 'Xwayland', 'gnome-session-b', 'gdm', 'dbus-broker']);
 // Entries below both thresholds are idle and not worth listing.
 const MIN_CPU = 0.5;
@@ -72,9 +69,18 @@ function readNetCounters() {
 }
 
 // Name of the systemd unit a process runs in, e.g. "app-gnome-firefox-1234.scope".
+// Chrome (via cgroupify) puts each child in a sub-cgroup named by its pid
+// below the unit, so take the innermost path segment that is a unit.
 function unitOf(pid) {
     const line = readText(`/proc/${pid}/cgroup`)?.split('\n').find(l => l.startsWith('0::'));
-    return line ? line.slice(line.lastIndexOf('/') + 1) : '';
+    return line?.split('/').findLast(s => /\.(scope|service)$/.test(s)) ?? '';
+}
+
+// Processes from one launch share the pid in their scope name even when the
+// app moves some of them to a scope of its own (Chrome's main process goes from
+// app-gnome-google\x2dchrome-N.scope to app-com.google.Chrome-N.scope).
+function launchKey(unit) {
+    return unit.match(/^app-.*-(\d+)\.scope$/)?.[1] ?? unit;
 }
 
 // Candidate desktop IDs encoded in a unit name. Follows the XDG/systemd naming:
@@ -108,42 +114,6 @@ function findSysDir(base, file, name = null) {
         en.close(null);
     } catch (e) {}
     return null;
-}
-
-// File descriptors of `pid` that point at a GPU (/dev/dri/*).
-function findDrmFds(pid) {
-    const fds = [];
-    let en;
-    try {
-        en = Gio.File.new_for_path(`/proc/${pid}/fd`).enumerate_children('standard::name', Gio.FileQueryInfoFlags.NONE, null);
-    } catch (e) {
-        return fds;
-    }
-    let info;
-    while ((info = en.next_file(null))) {
-        const fd = info.get_name();
-        try {
-            if (GLib.file_read_link(`/proc/${pid}/fd/${fd}`).startsWith('/dev/dri/')) fds.push(fd);
-        } catch (e) {}
-    }
-    en.close(null);
-    return fds;
-}
-
-// Busy time per DRM client on the given fds of `pid`, from the per-fd stats
-// the GPU driver exposes in /proc/<pid>/fdinfo (the same source nvtop/intel_gpu_top use).
-function readDrmClients(pid, fds, clients) {
-    for (const fd of fds) {
-        const txt = readText(`/proc/${pid}/fdinfo/${fd}`);
-        const id = txt?.match(/^drm-client-id:\s+(\d+)/m)?.[1];
-        if (!id || clients.has(id)) continue;
-        const engines = {};
-        for (const [, eng, ns] of txt.matchAll(/^drm-engine-([\w-]+):\s+(\d+) ns/gm)) {
-            const cap = Number(txt.match(new RegExp(`^drm-engine-capacity-${eng}:\\s+(\\d+)`, 'm'))?.[1] ?? 1);
-            engines[eng] = {ns: Number(ns), cap};
-        }
-        clients.set(id, engines);
-    }
 }
 
 class Bar {
@@ -230,30 +200,33 @@ class ProcRow {
             can_focus: true,
             y_align: Clutter.ActorAlign.CENTER,
         });
-        this._btn.connect('clicked', () => this.pids && onKill(this.pids));
+        this._btn.connect('clicked', () => this._entry && onKill(this._entry));
         this.actor.add_child(this._icon);
         this.actor.add_child(this._name);
         this.actor.add_child(this._cpu);
         this.actor.add_child(this._mem);
         this.actor.add_child(this._btn);
-        this.pids = null;
+        this._entry = null;
     }
 
+    // A web app row sits under its browser and has no numbers of its own:
+    // its usage is part of the browser's.
     set(entry) {
+        this._entry = entry ?? null;
         if (!entry) {
             this.actor.hide();
-            this.pids = null;
             return;
         }
         this.actor.show();
-        this.pids = entry.pids;
         if (entry.app) this._icon.gicon = entry.app.get_icon();
         else this._icon.icon_name = TERMINAL_ICON;
         this._name.text = entry.name;
-        this._cpu.text = entry.cpu < 1 ? '<1%' : `${entry.cpu.toFixed(0)}%`;
-        this._mem.text = fmtBytes(entry.rss);
+        if (entry.webApp) this.actor.add_style_class_name('sysmon-web-app');
+        else this.actor.remove_style_class_name('sysmon-web-app');
+        this._cpu.text = entry.webApp ? '–' : entry.cpu < 1 ? '<1%' : `${entry.cpu.toFixed(0)}%`;
+        this._mem.text = entry.webApp ? '–' : fmtBytes(entry.rss);
         this._cpu.remove_style_class_name('hot');
-        if (entry.cpu >= 25) this._cpu.add_style_class_name('hot');
+        if (!entry.webApp && entry.cpu >= 25) this._cpu.add_style_class_name('hot');
         this._btn.accessible_name = `Quit ${entry.name}`;
     }
 }
@@ -267,15 +240,9 @@ export default class SystemMonitorPanel extends Extension {
         this._cpuPct = 0;
         this._uid = this._getUid();
         this._appCache = new Map();
-        this._userPids = [];
-        this._gpuPrev = null;
-        this._gpuPrevTime = 0;
         this._unitCache = new Map();
-        this._drmFds = new Map();
-        this._ticks = 0;
         this._tempDir = findSysDir('/sys/class/hwmon', 'temp1_input', 'coretemp') ??
             findSysDir('/sys/class/hwmon', 'temp1_input', 'k10temp');
-        this._gpuCard = findSysDir('/sys/class/drm', 'gt_act_freq_mhz');
 
         this._button = new PanelMenu.Button(0.5, this.metadata.name, false);
         this._button.add_child(new St.Icon({icon_name: 'power-profile-performance-symbolic', style_class: 'system-status-icon'}));
@@ -286,7 +253,6 @@ export default class SystemMonitorPanel extends Extension {
         this._bars = {
             cpu: new Bar('CPU', 'processes-symbolic'),
             temp: new Bar('Temp', 'temperature-symbolic'),
-            gpu: new Bar('GPU', 'video-display-symbolic'),
             ram: new Bar('RAM', 'drive-harddisk-solidstate-symbolic'),
         };
         const statsItem = new PopupMenu.PopupBaseMenuItem({reactive: false, can_focus: false});
@@ -315,14 +281,12 @@ export default class SystemMonitorPanel extends Extension {
         Main.panel.addToStatusArea(this.uuid, this._button, idx, 'right');
     }
 
-    // Take a baseline (CPU, per-process and GPU time, net counters are all
+    // Take a baseline (CPU, per-process time and net counters are all
     // deltas), show the first real numbers shortly after, then refresh every second.
     _startMonitoring() {
         this._stopMonitoring();
-        this._ticks = 0;
         this._updateCpu();
         this._scanProcesses();
-        this._updateGpu();
         this._netPrev = readNetCounters();
         this._netPrevTime = GLib.get_monotonic_time();
         this._timeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, FIRST_SAMPLE_MS, () => {
@@ -343,8 +307,6 @@ export default class SystemMonitorPanel extends Extension {
         // Drop per-process state; it's rebuilt on the next open.
         this._prevProc?.clear();
         this._unitCache?.clear();
-        this._drmFds?.clear();
-        this._gpuPrev = null;
     }
 
     _getUid() {
@@ -366,7 +328,7 @@ export default class SystemMonitorPanel extends Extension {
         box.add_child(this._emptyLabel);
         const rows = [];
         for (let i = 0; i < TOP_N; i++) {
-            const r = new ProcRow(pids => this._kill(pids));
+            const r = new ProcRow(entry => this._kill(entry));
             rows.push(r);
             box.add_child(r.actor);
         }
@@ -375,11 +337,17 @@ export default class SystemMonitorPanel extends Extension {
         return rows;
     }
 
-    _kill(pids) {
-        try {
-            Gio.Subprocess.new(['kill', '-TERM', ...pids.map(String)], Gio.SubprocessFlags.NONE);
-        } catch (e) {
-            console.error(`system-monitor-panel: kill failed: ${e}`);
+    // A web app shares the browser's processes, so it's closed through its
+    // windows rather than killed.
+    _kill(entry) {
+        if (entry.webApp) {
+            entry.app.request_quit();
+        } else {
+            try {
+                Gio.Subprocess.new(['kill', '-TERM', ...entry.pids.map(String)], Gio.SubprocessFlags.NONE);
+            } catch (e) {
+                console.error(`system-monitor-panel: kill failed: ${e}`);
+            }
         }
         if (this._killId) GLib.source_remove(this._killId);
         this._killId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 800, () => {
@@ -390,7 +358,6 @@ export default class SystemMonitorPanel extends Extension {
     }
 
     _tick() {
-        this._ticks++;
         this._updateCpu();
         const mem = this._readMem();
 
@@ -402,10 +369,11 @@ export default class SystemMonitorPanel extends Extension {
             .filter(a => a.cpu >= MIN_CPU || a.rss >= MIN_RSS_KB);
         // CPU% and memory are both shares of the whole machine, so rank by the heavier.
         const load = a => Math.max(a.cpu / 100, mem.total ? a.rss / mem.total : 0);
-        const top = apps.sort((a, b) => load(b) - load(a));
+        const top = apps.sort((a, b) => load(b) - load(a)).flatMap(a => [a, ...a.webApps.map(app => ({
+            name: app.get_name().replace(/\s*\(PWA\)$/, ''), app, webApp: true,
+        }))]);
         this._procRows.forEach((r, i) => r.set(top[i]));
         this._emptyLabel.visible = top.length === 0;
-        this._updateGpu();
         this._updateNet();
     }
 
@@ -418,44 +386,6 @@ export default class SystemMonitorPanel extends Extension {
         }
         const c = milli / 1000;
         this._bars.temp.set(c / 100, `${c.toFixed(0)} °C`);
-    }
-
-    // Busiest GPU engine (render, video, ...) across this user's processes,
-    // since the last sample, plus the current GPU clock.
-    _updateGpu() {
-        const clients = new Map();
-        const rescan = this._ticks % DRM_RESCAN_TICKS === 0;
-        const drmFds = new Map();
-        for (const pid of this._userPids) {
-            let fds = this._drmFds.get(pid);
-            if (!fds || rescan) fds = findDrmFds(pid);
-            drmFds.set(pid, fds);
-            if (fds.length) readDrmClients(pid, fds, clients);
-        }
-        this._drmFds = drmFds;
-        const now = GLib.get_monotonic_time() * 1000;
-        const dt = now - this._gpuPrevTime;
-
-        let busy = null;
-        if (this._gpuPrev && dt < 3 * REFRESH_MS * 1e6) {
-            const perEngine = {};
-            for (const [id, engines] of clients) {
-                const prev = this._gpuPrev.get(id);
-                if (!prev) continue;
-                for (const [eng, {ns, cap}] of Object.entries(engines)) {
-                    const d = ns - (prev[eng]?.ns ?? ns);
-                    if (d > 0) perEngine[eng] = (perEngine[eng] ?? 0) + d / cap;
-                }
-            }
-            busy = Math.min(1, Math.max(0, ...Object.values(perEngine)) / dt);
-        }
-        this._gpuPrev = clients;
-        this._gpuPrevTime = now;
-
-        const mhz = this._gpuCard ? Number(readText(`${this._gpuCard}/gt_act_freq_mhz`)) : NaN;
-        const freq = Number.isFinite(mhz) ? ` · ${mhz} MHz` : '';
-        if (busy === null) this._bars.gpu.set(0, `…${freq}`);
-        else this._bars.gpu.set(busy, `${(busy * 100).toFixed(0)}%${freq}`);
     }
 
     _updateNet() {
@@ -518,29 +448,42 @@ export default class SystemMonitorPanel extends Extension {
     // services (gvfs, portals, evolution, gnome-software's daemon, ...) are
     // dropped unless they own an open window. Commands run in a terminal are
     // listed individually so one runaway shell can be stopped on its own.
+    //
+    // Chrome web apps (Spotify, Teams, ...) live inside the browser's processes,
+    // and Chrome doesn't expose which process serves which, so their usage
+    // stays in the browser's entry and they're listed under it.
     _groupApps(procs) {
         const windowApps = new Map();
         for (const app of Shell.AppSystem.get_default().get_running()) {
-            for (const pid of app.get_pids())
-                windowApps.set(pid, app);
+            for (const pid of app.get_pids()) {
+                if (!windowApps.has(pid)) windowApps.set(pid, []);
+                windowApps.get(pid).push(app);
+            }
         }
 
-        const byUnit = new Map();
+        const byLaunch = new Map();
         for (const p of procs) {
-            if (!byUnit.has(p.unit)) byUnit.set(p.unit, []);
-            byUnit.get(p.unit).push(p);
+            const key = launchKey(p.unit);
+            if (!byLaunch.has(key)) byLaunch.set(key, []);
+            byLaunch.get(key).push(p);
         }
 
         const groups = [];
-        for (const [unit, list] of byUnit) {
-            if (/-spawn-.*\.scope$/.test(unit)) {
+        for (const list of byLaunch.values()) {
+            if (/-spawn-.*\.scope$/.test(list[0].unit)) {
                 for (const p of list)
-                    groups.push({name: p.name, app: null, pids: [p.pid], cpu: p.cpu, rss: p.rss});
+                    groups.push({name: p.name, app: null, webApps: [], pids: [p.pid], cpu: p.cpu, rss: p.rss});
                 continue;
             }
-            const app = list.map(p => windowApps.get(p.pid)).find(a => a) ?? this._lookupApp(unit);
+            // A pid owning windows of several apps is a host process (the
+            // browser), so only a single-app pid identifies the app directly.
+            const app = list.map(p => windowApps.get(p.pid)).find(a => a?.length === 1)?.[0] ??
+                [...new Set(list.map(p => p.unit))].map(u => this._lookupApp(u)).find(a => a);
             if (!app) continue;
+            const hosted = new Set(list.flatMap(p => windowApps.get(p.pid) ?? []));
+            hosted.delete(app);
             groups.push({
+                webApps: [...hosted].sort((a, b) => a.get_name().localeCompare(b.get_name())),
                 name: app.get_name(),
                 app,
                 pids: list.map(p => p.pid),
@@ -559,6 +502,7 @@ export default class SystemMonitorPanel extends Extension {
                 continue;
             }
             m.pids.push(...g.pids);
+            m.webApps.push(...g.webApps.filter(a => !m.webApps.includes(a)));
             m.cpu += g.cpu;
             m.rss += g.rss;
         }
@@ -616,7 +560,6 @@ export default class SystemMonitorPanel extends Extension {
         }
         this._prevProc = cur;
         this._prevTime = now;
-        this._userPids = [...cur.keys()];
         return procs;
     }
 
@@ -626,8 +569,7 @@ export default class SystemMonitorPanel extends Extension {
         this._button = null;
         this._bars = this._procRows = this._emptyLabel = null;
         this._prevProc = null;
-        this._appCache = this._unitCache = this._drmFds = null;
-        this._gpuPrev = this._userPids = null;
+        this._appCache = this._unitCache = null;
         this._net = this._netPrev = null;
     }
 }

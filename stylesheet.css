@@ -28,3 +28,8 @@
 .sysmon-proc-row:hover .sysmon-kill { color: rgba(255,255,255,0.8); }
 .sysmon-kill:hover, .sysmon-proc-row:hover .sysmon-kill:hover { background-color: #c01c28; color: #ffffff; }
 .sysmon-kill:focus { box-shadow: inset 0 0 0 2px rgba(53,132,228,0.8); }
+
+/* Long app names ellipsize instead of widening the menu. */
+.sysmon-proc-name { max-width: 170px; }
+.sysmon-web-app { padding-left: 24px; }
+.sysmon-web-app .sysmon-proc-name, .sysmon-web-app .sysmon-proc-val { color: rgba(255,255,255,0.65); }

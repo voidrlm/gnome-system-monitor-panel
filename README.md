@@ -1,6 +1,6 @@
 # System Monitor Panel for GNOME
 
-A GNOME Shell extension that shows CPU, temperature, GPU and RAM usage in the top bar, with a list of the heaviest apps and a button to close them.
+A GNOME Shell extension that shows CPU, temperature, RAM and network usage in the top bar, with a list of the heaviest apps and a button to close them. Chrome web apps (Spotify, Teams, ...) are listed under Chrome and can be closed one by one.
 
 ![Performance gauge in the top bar](screenshots/panel.png)
 

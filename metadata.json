@@ -1,6 +1,6 @@
 {
   "uuid": "system-monitor-panel@arjun",
   "name": "System Monitor Panel",
-  "description": "Top-bar CPU/temperature/GPU/RAM usage with a list of the heaviest apps and a button to terminate them.",
+  "description": "Top-bar CPU/temperature/RAM/network usage with a list of the heaviest apps and a button to terminate them.",
   "shell-version": ["50"]
 }
